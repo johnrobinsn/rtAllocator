@@ -1,3 +1,6 @@
+// Copyright 2006-2013 John Robinson
+// MIT License
+
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,17 +11,26 @@
 #pragma warning (disable: 4312)
 #endif
 
-#define ALLOCJR_ALIGN8 1
 //#define ALLOCJR_COUNTERS 1
+#define ALLOCJR_ALIGN8 1
 
 #ifdef ALLOCJR_COUNTERS
 #include "math.h"
 #endif
 
-#define ALLOCJR_FULLBLOCK (block*)0xffffffff
+#define ALLOCJR_FULLBLOCK ((block*)~(uintptr_t)0)
 
-#if 0
-#include "alloctest.h" // blockalloc and blockfree
+inline void*   blockalloc(long size) {
+	return malloc(size);
+}
+inline void*   blockrealloc(void* fp, long newsize) {
+	return realloc(fp, newsize);
+} 
+inline void    blockfree(void* p) {
+	free(p);
+}
+
+#if 1
 #define ALLOCJR_ALLOC blockalloc
 #define ALLOCJR_REALLOC blockrealloc
 #define ALLOCJR_FREE blockfree
@@ -51,14 +63,15 @@ public:
 
 		mLastByte = (unsigned char*)this + getAllocSize(this->mFixedAllocSize, this->mChunks)-1;
 		unsigned char* mDataStart = (unsigned char*)this + getHeaderSize(mChunks);
+
 #ifdef ALLOCJR_ALIGN8
-		mDataStart = (unsigned char*)(((unsigned long)mDataStart+8)&~7); // 8 byte align
+		mDataStart = (unsigned char*)(((uintptr_t)mDataStart+8)&~7); // 8 byte align
 #endif
 
 		mFreeChunk = NULL;
 		mInitCursor = mDataStart;
 
-		mTotalCount = mChunks * 16;
+		mTotalCount = mChunks;
 
 		return true;
 	}
@@ -80,7 +93,7 @@ public:
 		if (mFreeChunk)
 		{
 			result = mFreeChunk;
-			mFreeChunk = (void**)*mFreeChunk;
+			mFreeChunk = (void**)*mFreeChunk;  // assumption here that a alloc unit can hold a pointer
 		}
 		else
 		{
@@ -107,13 +120,13 @@ public:
 
 	static unsigned long getAllocSize(int fixedAllocSize, int chunks)
 	{
-#ifdef ALLOCJR_ALIGN8
-#define PAD8 +8 // tack on 8 extra bytes to ensure enough room for alignment
-#else
-#define PAD8
-#endif
-		return getHeaderSize(chunks) + (fixedAllocSize * 16 * chunks) PAD8;
-#undef PAD8
+		unsigned long r = getHeaderSize(chunks) + (fixedAllocSize * chunks);
+
+		#ifdef ALLOCJR_ALIGN8
+		r = (r+8)&~7; // tack on 8 extra bytes to ensure enough room for alignment
+		#endif
+
+		return r;
 	}
 
 	inline unsigned char* getLastByte()
@@ -128,7 +141,7 @@ public:
 	unsigned long mTotalCount;
 	unsigned long mAllocCount;
 	unsigned char *mInitCursor;
-	unsigned short mFixedAllocSize;
+	unsigned short mFixedAllocSize; // size of allocs in this block
 	unsigned short mChunks;
 	unsigned char mBDIndex;
 	unsigned char* mLastByte;
@@ -203,20 +216,15 @@ void rtAllocator::init()
 	if (mInited) return;
 
 	// initialize the block descriptors for each heap.
-	bd[0].fixedAllocSize = 4;
-	bd[0].chunks = 3;
+	bd[0].fixedAllocSize = sizeof(void*); // Has to be big enough to hold a pointer
+	bd[0].chunks = 128;
 	// initialize for multiple of 8
 	for (int i = 1; i < bdCount; i++)
 	{
-		int allocSize = i*8;
-		int chunks = 11;
+		int allocSize = i*8;  // Has to be big enough to hold a pointer... 8 enough for 64bit
+		int chunks = 128;
 
 		bd[i].fixedAllocSize = allocSize;
-
-		if (allocSize == 8) chunks = 3;
-		else if (allocSize == 1008) chunks = 1;
-		else if (allocSize == 1016) chunks = 1;
-		else if (allocSize == 1024) chunks = 1;
 
 		bd[i].chunks = chunks;
 	}
@@ -229,7 +237,7 @@ void rtAllocator::init()
 
 	// lookup table used to quickly find out which heap the alloc request
 	// should go to.
-	for (int i = 0; i < 1024; i++)
+	for (int i = 0; i <= 1024; i++)
 	{
 		mBDIndexLookup[i] = -1;
 		for (int j = 0; j < bdCount; j++)
@@ -265,10 +273,7 @@ void* rtAllocator::alloc(size_t ls)
 		if (!mFreeBlocks[bdIndex])
 		{
 			INCBLOCKCOUNTER();
-#if 1
-			bd[bdIndex].chunks*=2;
-			if (bd[bdIndex].chunks > 20) bd[bdIndex].chunks = 1;
-#endif
+
 			block* b = (block*)ALLOCJR_ALLOC(block::getAllocSize(bd[bdIndex].fixedAllocSize, bd[bdIndex].chunks));
 			if (b)
 			{
@@ -309,12 +314,16 @@ void rtAllocator::free(void* p)
 {
 	if (!p) return;
 
-	block* b = findBlockInArray(p);
+	int i;
+
+	block* b = findBlockInArray(p, i);
+	#if 1
 	if (b)
 	{
+
 		b->free(p);
 		INCFREECOUNTER(block->mMarker);
-#if 0
+#if 1
 		if (b->isEmpty())
 		{
 			// Unlink from freelist and return to the system
@@ -328,11 +337,10 @@ void rtAllocator::free(void* p)
 			}
 			if (mFreeBlocks[b->mBDIndex] == b) mFreeBlocks[b->mBDIndex] = b->mNextFreeBlock;
 
-			removeBlockFromArray(b);
+			removeBlockIndexFromArray(i);
 
 			DECBLOCKCOUNTER();
 			ALLOCJR_FREE(b);
-
 		}
 		else
 #endif
@@ -353,6 +361,7 @@ void rtAllocator::free(void* p)
 		ALLOCJR_FREE(p);
 		INCFREECOUNTER(bdCount);
 	}
+	#endif
 }
 
 void rtAllocator::addBlockToArray(block* b)
@@ -364,7 +373,7 @@ void rtAllocator::addBlockToArray(block* b)
 	}
 	if (mBlockArraySize < mBlockCount+1)
 	{
-		mBlockArraySize += 10000;
+		mBlockArraySize += 25000 * sizeof(void*);
 		mBlockArray= (block**)ALLOCJR_REALLOC(mBlockArray, sizeof(block**)*mBlockArraySize);
 		mBlockArrayEnd = mBlockArray+mBlockCount-1;
 	}
@@ -398,6 +407,7 @@ void rtAllocator::addBlockToArray(block* b)
 	mBlockArray[s] = b;
 	mBlockCount++;
 	mBlockArrayEnd = mBlockArray+mBlockCount-1;
+
 }	
 
 int rtAllocator::findBlockIndex(void* b)
@@ -408,13 +418,13 @@ int rtAllocator::findBlockIndex(void* b)
 	{
 		block** s = mBlockArray;
 		block** e = mBlockArrayEnd;
-		block** m = s + ((e-s+1)>>1);
+		block** m = s + ((e-s+1)/2);
 
 		while (s < m) // Given this condition alone we know that m-1 exists
 		{
 			if ((unsigned char*)b <  (unsigned char*)*m) e = m-1;
 			else if ((unsigned char*)b >= (unsigned char*)*m) s = m;
-			m = s + ((e-s+1)>>1);
+			m = s + ((e-s+1)/2);
 		}
 
 		if (m >= mBlockArray && m <= mBlockArrayEnd) // valid block
@@ -424,6 +434,32 @@ int rtAllocator::findBlockIndex(void* b)
 	}
 
 	return result;
+}
+
+void rtAllocator::removeBlockIndexFromArray(int i)
+{
+	//int m = findBlockIndex(b);
+	int m = i;
+
+	if (m >=0)
+	{
+		if (mLastFoundBlock == mBlockArray[m]) mLastFoundBlock = NULL;
+		for (long i = m+1; i < mBlockCount; i++)
+		{
+			mBlockArray[i-1] = mBlockArray[i];
+		}
+		mBlockCount--;
+		mBlockArrayEnd = mBlockArray+mBlockCount-1;
+
+#if 1
+		if (mBlockCount == 0)
+		{
+			ALLOCJR_FREE(mBlockArray);
+			mBlockArray = NULL;
+			mBlockArrayEnd = NULL;
+		}	
+#endif
+	}
 }
 
 void rtAllocator::removeBlockFromArray(block* b)
@@ -440,24 +476,29 @@ void rtAllocator::removeBlockFromArray(block* b)
 		mBlockCount--;
 		mBlockArrayEnd = mBlockArray+mBlockCount-1;
 
+#if 1
 		if (mBlockCount == 0)
 		{
 			ALLOCJR_FREE(mBlockArray);
 			mBlockArray = NULL;
 			mBlockArrayEnd = NULL;
 		}	
+#endif
 	}
 }
 
-block* rtAllocator::findBlockInArray(void* p)
+block* rtAllocator::findBlockInArray(void* p, int& i)
 {
+	#if 1
 	if (mLastFoundBlock)
 	{
 		if ((unsigned char*)mLastFoundBlock <= p && p <= mLastFoundBlock->getLastByte())
 		{
+			i = mLastFoundBlockIndex;
 			return mLastFoundBlock;
 		}
 	}
+	#endif
 
 	// binary search code duped here to avoid function call penalty
 	block* result = NULL;
@@ -466,16 +507,20 @@ block* rtAllocator::findBlockInArray(void* p)
 
 		block** s = mBlockArray;
 		block** e = mBlockArrayEnd;
-		block** m = s + ((e-s+1)>>1);
+		block** m = s + ((e-s+1)/2);
 		while (s < m) // Given this condition alone we know that m-1 exists
 		{
 			if ((unsigned char*)p <  (unsigned char*)*m) e = m-1;
 			else if ((unsigned char*)p >= (unsigned char*)*m) s = m;
-			m = s + ((e-s+1)>>1);
+			m = s + ((e-s+1)/2);
 		}
 		if (m >= mBlockArray && m <= mBlockArrayEnd) // valid block
-			if ((unsigned char*)p >= (unsigned char*)*m && (unsigned char*)p <= (*m)->getLastByte())
+			if ((unsigned char*)p >= (unsigned char*)*m && (unsigned char*)p <= (*m)->getLastByte()) {
 				result = mLastFoundBlock = *m;
+				// calculate index
+				i = m-mBlockArray;
+				mLastFoundBlockIndex = i;
+			}
 	}
 	return result;
 }
@@ -483,11 +528,12 @@ block* rtAllocator::findBlockInArray(void* p)
 block* rtAllocator::mFreeBlocks[bdCount];
 long rtAllocator::mBlockCount = 0;
 block* rtAllocator::mLastFoundBlock = NULL;
-long rtAllocator::mBlockArraySize = 10000;
+int rtAllocator::mLastFoundBlockIndex;
+long rtAllocator::mBlockArraySize = 25000 * sizeof(void*);
 block** rtAllocator::mBlockArray = NULL;
 block** rtAllocator::mBlockArrayEnd = NULL;
 bool rtAllocator::mInited = false;
-char rtAllocator::mBDIndexLookup[1025];
+unsigned char rtAllocator::mBDIndexLookup[1025];
 
 // helper class to initialize my allocator
 class initializer
