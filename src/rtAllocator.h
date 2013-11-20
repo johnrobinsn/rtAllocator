@@ -17,10 +17,11 @@ private:
 	static void init();
 
 	static int findBlockIndex(void* b);
-	static block* findBlockInArray(void* p);
+	static block* findBlockInArray(void* p, int& i);
 
 	static void addBlockToArray(block* b);
 	static void removeBlockFromArray(block* b);
+	static void removeBlockIndexFromArray(int i);
 
 	static block* mFreeBlocks[bdCount];
 	static long mBlockCount;
@@ -29,6 +30,10 @@ private:
 	static block** mBlockArrayEnd;
 	static bool mInited;
 	static block* mLastFoundBlock;
-	static char mBDIndexLookup[1025];
+	static int mLastFoundBlockIndex;
+	static unsigned char mBDIndexLookup[1025];
 };
 
+void*   blockalloc(long size);
+void*   blockrealloc(void* fp, long newsize);
+void    blockfree(void* p);
